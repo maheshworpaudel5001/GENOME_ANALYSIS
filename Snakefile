@@ -68,7 +68,8 @@ rule samtools_sort:
     threads: workflow.cores
     shell:
         """
-        samtools sort -T -@ {threads} 'results/{patient}.{region}/{accession} -O BAM {input} > {output}'
+        module load SAMtools/1.15
+        samtools sort --threads {threads} -T results/{wildcards.patient}.{wildcards.region}/{wildcards.accession} -O BAM {input} > {output}
         """
 
 rule samtools_index:
@@ -78,4 +79,7 @@ rule samtools_index:
         'results/{patient}.{region}/{accession}.tumor.aln.srt.bam.bai'
     threads: workflow.cores
     shell:
-        "samtools -@ {threads} index {input}"
+        """
+        module load SAMtools/1.15
+        samtools index -@ {threads} {input}
+        """
