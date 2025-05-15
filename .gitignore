@@ -1,2 +1,4 @@
 .snakemake/
 slurm*
+results/
+workbook.ipynb
