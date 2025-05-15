@@ -5,81 +5,113 @@ import pandas as pd
 
 PATIENT = config.get('patient', None)
 REGION = config.get('region', None)
+
 if PATIENT is None or REGION is None:
     print("Error: Please provide a patient name and region using --config patient=PATIENT_ID region=REGION_ID")
     sys.exit(1)
 
-#Load accession numbers for tumor samples for the patient
-info_table = pd.read_csv('../../lab/data/nih_brain_tumor_data/GBM/SraRunTable.txt', sep=',')
-pattern = f"{PATIENT}.{REGION}.Tumor.DNA"
-ACCESSIONS = info_table[info_table['Sample Name'].str.contains(pattern, na=False)]['Run'].tolist()
+# Determine patient class
+PATIENT_CLASS = 'brmet' if 'BrMET' in PATIENT else 'gbm'
 
-if len(ACCESSIONS) == 0:
-    print(f"Error: No accessions found matching pattern: {pattern}")
+# Load accession numbers for tumor samples for the patient
+sra_table = 'SraRunTable.txt'
+info_table = pd.read_csv(sra_table, sep=',')
+tumor_pattern = f"{PATIENT}.{REGION}.Tumor.DNA"
+normal_pattern = f"{PATIENT}.Normal.DNA"
+TUMOR_ACCESSIONS = info_table[info_table['Sample Name'].str.contains(tumor_pattern, na=False)]['Run'].tolist()
+NORMAL_ACCESSIONS = info_table[info_table['Sample Name'] == normal_pattern]['Run'].tolist()
+
+if len(TUMOR_ACCESSIONS) == 0:
+    print(f"Error: No accessions found matching pattern: {tumor_pattern}")
     sys.exit(1)
 else:
-    print(f"Found {len(ACCESSIONS)} accession(s) for pattern '{pattern}': {ACCESSIONS}")
+    print(f"Found {TUMOR_ACCESSIONS} accessions for pattern {tumor_pattern}")
+
+if len(NORMAL_ACCESSIONS) == 0:
+    print(f"Error: No normal sample found for pattern '{normal_pattern}'")
+    sys.exit(1)
+else:
+    print(f"Found {NORMAL_ACCESSIONS} accession(s) for pattern {normal_pattern}")
+
+TUMOR_ACCESSION = TUMOR_ACCESSIONS[0]
+NORMAL_ACCESSION = NORMAL_ACCESSIONS[0]
 
 rule all:
     input:
-        expand("results/{patient}.{region}/{accession}.tumor.aln.srt.bam", accession=ACCESSIONS, patient=PATIENT, region=REGION),
-        expand("results/{patient}.{region}/{accession}.tumor.aln.srt.bam.bai", accession=ACCESSIONS, patient=PATIENT, region=REGION)
+        f"results/{PATIENT}.{REGION}/{TUMOR_ACCESSION}.tumor.aln.srt.bam",
+        f"results/{PATIENT}.{REGION}/{TUMOR_ACCESSION}.tumor.aln.srt.bam.bai",
+        f"results/{PATIENT}.normal.aln.srt.bam",
+        f"results/{PATIENT}.normal.aln.srt.bam.bai",
+        f"results/{PATIENT}.{REGION}/strelka/results/variants/somatic.snvs.vcf.gz",
+        f"results/{PATIENT}.{REGION}/strelka/results/variants/somatic.indels.vcf.gz"
 
-rule bwa_map:
+rule map_tumor:
     input:
-        ref = 'hs38DH.fa',
-        r1='../../lab/data/nih_brain_tumor_data/brmet/{accession}/{accession}_1.fastq.gz',
-        r2='../../lab/data/nih_brain_tumor_data/brmet/{accession}/{accession}_2.fastq.gz'
-    output:
-        bam='results/{patient}.{region}/{accession}.tumor.aln.bam'
+        ref = 'hs38DH.fa'
     params:
-        rg=r"@RG\tID:{accession}\tSM:{patient}.{region}\tPL:ILLUMINA"
+        r1 = f"../../lab/data/nih_brain_tumor_data/{PATIENT_CLASS}/{TUMOR_ACCESSION}/{TUMOR_ACCESSION}_1.fastq.gz",
+        r2 = f"../../lab/data/nih_brain_tumor_data/{PATIENT_CLASS}/{TUMOR_ACCESSION}/{TUMOR_ACCESSION}_2.fastq.gz",
+        rg = f"@RG\tID:{TUMOR_ACCESSION}\tSM:{PATIENT}.{REGION}\tPL:ILLUMINA"
+    output:
+        bam = f'results/{PATIENT}.{REGION}/{TUMOR_ACCESSION}.tumor.aln.srt.bam',
+        bai = f'results/{PATIENT}.{REGION}/{TUMOR_ACCESSION}.tumor.aln.srt.bam.bai'
     threads: workflow.cores
     shell:
         """
-        module load GCC/7.3.0-2.30  OpenMPI/3.1.1
         module load bwa-mem2/2.2.1
         module load SAMtools/1.15
 
-        echo "Running alignment for {wildcards.accession}..."
-        mkdir -p results/{wildcards.patient}.{wildcards.region}/
+        bwa-mem2 mem -t {threads} -R '{params.rg}' {input.ref} {params.r1} {params.r2} \
+        | samtools view -@ {threads} -Sb - \
+        | samtools sort -@ {threads} -o {output.bam} -
+        samtools index -@ {threads} {output.bam}
+        """
 
-        # Remove old output if it exists
-        if [ -f {output.bam} ]; then
-        echo "Warning: Overwriting existing file {output.bam}"
-        rm -f {output.bam}
-        fi
+rule map_normal:
+    input:
+        ref = 'hs38DH.fa'
+    params:
+        r1 = f"../../lab/data/nih_brain_tumor_data/{PATIENT_CLASS}/{NORMAL_ACCESSION}/{NORMAL_ACCESSION}_1.fastq.gz",
+        r2 = f"../../lab/data/nih_brain_tumor_data/{PATIENT_CLASS}/{NORMAL_ACCESSION}/{NORMAL_ACCESSION}_2.fastq.gz",
+        rg = f"@RG\tID:{NORMAL_ACCESSION}\tSM:{PATIENT}.normal\tPL:ILLUMINA"
+    output:
+        bam = f'results/{PATIENT}.normal.aln.srt.bam',
+        bai = f'results/{PATIENT}.normal.aln.srt.bam.bai'
+    threads: workflow.cores
+    shell:
+        """
+        module load bwa-mem2/2.2.1
+        module load SAMtools/1.15
 
-        bwa-mem2 mem -t{threads} -R '{params.rg}' {input.ref} {input.r1} {input.r2}\
-        | samtools view -1 -Sb - > {output.bam};
+        bwa-mem2 mem -t {threads} -R '{params.rg}' {input.ref} {params.r1} {params.r2} \
+        | samtools view -@ {threads} -Sb - \
+        | samtools sort -@ {threads} -o {output.bam} -
+        samtools index -@ {threads} {output.bam}
+        """
+
+rule somatic_variant_call_strelka:
+    input:
+        ref = 'hs38DH.fa'
+    output:
+        snvs = f"results/{PATIENT}.{REGION}/strelka/results/variants/somatic.snvs.vcf.gz",
+        indels = f"results/{PATIENT}.{REGION}/strelka/results/variants/somatic.indels.vcf.gz"
+    params:
+        runDir = f'results/{PATIENT}.{REGION}/strelka',
+        normal = f'results/{PATIENT}.normal.aln.srt.bam',
+        tumor = f'results/{PATIENT}.{REGION}/{TUMOR_ACCESSION}.tumor.aln.srt.bam'
+    threads: workflow.cores
+    shell:
+        """
+        module load GCCcore/10.2.0
+        module load Python/2.7.18
         
-        # Verify output was created
-        if [ ! -f {output.bam} ]; then
-            echo "Error: Alignment failed - output file not created"
-            exit 1
-        fi
-        """
+        #configure strelka
+        ../strelka-2.9.2.centos6_x86_64/bin/configureStrelkaSomaticWorkflow.py \
+        --normalBam {params.normal} \
+        --tumorBam {params.tumor} \
+        --referenceFasta {input.ref} \
+        --runDir {params.runDir}
 
-rule samtools_sort:
-    input:
-        'results/{patient}.{region}/{accession}.tumor.aln.bam'
-    output:
-        'results/{patient}.{region}/{accession}.tumor.aln.srt.bam'
-    threads: workflow.cores
-    shell:
-        """
-        module load SAMtools/1.15
-        samtools sort --threads {threads} -T results/{wildcards.patient}.{wildcards.region}/{wildcards.accession} -O BAM {input} > {output}
-        """
-
-rule samtools_index:
-    input:
-        'results/{patient}.{region}/{accession}.tumor.aln.srt.bam'
-    output:
-        'results/{patient}.{region}/{accession}.tumor.aln.srt.bam.bai'
-    threads: workflow.cores
-    shell:
-        """
-        module load SAMtools/1.15
-        samtools index -@ {threads} {input}
+        #run strelka
+        {params.runDir}/runWorkflow.py -m local -j {threads}
         """
